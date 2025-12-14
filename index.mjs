@@ -9,7 +9,6 @@ import makeWASocket, {
 import crypto from 'crypto';
 import fetch from 'node-fetch';
 
-// Node 18'den küçükse fetch global olmayabilir, garantiye al
 if (!globalThis.fetch) {
   globalThis.fetch = fetch;
 }
@@ -17,10 +16,8 @@ if (!globalThis.fetch) {
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Slack slash command payload'ı x-www-form-urlencoded gelir
 app.use(express.urlencoded({ extended: true }));
 
-// rawBody yakalamak için middleware
 app.use((req, res, next) => {
   if (
     req.method === 'POST' &&
@@ -37,30 +34,30 @@ app.use((req, res, next) => {
   }
 });
 
-
-// -----------------------------------------------------
-// 1) Baileys: WhatsApp istemcisi
-// -----------------------------------------------------
 let waSock = null;
 async function initWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('./wa_auth');
-  const { version } = await fetchLatestBaileysVersion();
-  waSock = makeWASocket({
-    auth: state,
-    printQRInTerminal: true,
-    version,
-    browser: Browsers.macOS('Chrome')
-  });
-  waSock.ev.on('creds.update', saveCreds);
-  waSock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'open') {
-      console.log('✅ WhatsApp bağlantısı açık');
-    } else if (connection === 'close') {
-      console.log('❌ WhatsApp bağlantısı kapandı, yeniden deneniyor...', lastDisconnect?.error);
-      initWhatsApp().catch(err => console.error('WA reconnect error', err));
-    }
-  });
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState('./wa_auth');
+    const { version } = await fetchLatestBaileysVersion();
+    waSock = makeWASocket({
+      auth: state,
+      printQRInTerminal: true,
+      version,
+      browser: Browsers.macOS('Chrome')
+    });
+    waSock.ev.on('creds.update', saveCreds);
+    waSock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect } = update;
+      if (connection === 'open') {
+        console.log('✅ WhatsApp bağlantısı açık');
+      } else if (connection === 'close') {
+        console.log('❌ WhatsApp bağlantısı kapandı, yeniden deneniyor...');
+        initWhatsApp().catch(err => console.error('WA reconnect error', err));
+      }
+    });
+  } catch (err) {
+    console.error('WhatsApp init error:', err);
+  }
 }
 
 async function sendWhatsAppAlarm(message) {
@@ -82,27 +79,19 @@ async function sendWhatsAppAlarm(message) {
   }
 }
 
-// -----------------------------------------------------
-// 2) Slack signature doğrulama
-// -----------------------------------------------------
 function verifySlackSignature(req) {
   const signingSecret = process.env.SLACK_SIGNING_SECRET;
-  if (!signingSecret) return true; // .env boş ise doğrulama kapalı olsun
-
+  if (!signingSecret) return true;
   const timestamp = req.headers['x-slack-request-timestamp'];
   const signature = req.headers['x-slack-signature'];
-
   if (!timestamp || !signature) return false;
-
   const fiveMinutesAgo = Math.floor(Date.now() / 1000) - (60 * 5);
   if (Number(timestamp) < fiveMinutesAgo) return false;
-
   const sigBaseString = `v0:${timestamp}:${req.rawBody}`;
   const mySig = 'v0=' + crypto
     .createHmac('sha256', signingSecret)
     .update(sigBaseString)
     .digest('hex');
-
   try {
     return crypto.timingSafeEqual(
       Buffer.from(mySig, 'utf8'),
@@ -113,10 +102,6 @@ function verifySlackSignature(req) {
   }
 }
 
-
-// -----------------------------------------------------
-// 3) Ana endpoint: /slack/finans
-// -----------------------------------------------------
 app.post('/slack/finans', async (req, res) => {
   try {
     if (!verifySlackSignature(req)) {
@@ -131,20 +116,17 @@ app.post('/slack/finans', async (req, res) => {
       return res.json({ text: 'Komut gövdesi boş. Lütfen /finans formatını kullan.' });
     }
 
-    // 3.1. OpenAI ile ayrıştırma
     const openaiKey = process.env.OPENAI_API_KEY;
     if (!openaiKey) {
       return res.json({ text: 'OPENAI_API_KEY tanımlı değil.' });
     }
 
-    const prompt = `
-Sen bir Finans OS komut ayrıştırıcısın. Kullanıcı sana Slack /finans komutunun gövdesini verecek.
+    const prompt = `Sen bir Finans OS komut ayrıştırıcısın. Kullanıcı sana Slack /finans komutunun gövdesini verecek.
 Görevlerin:
-- Metindeki alanları yakala:
-  islem, ad, tutar, etiket, faiz, oncelik, aciklama
+- Metindeki alanları yakala: islem, ad, tutar, etiket, faiz, oncelik, aciklama
 - Eksik alan varsa "valid": false ve "hata" mesajı üret.
-- Her şey uygunsa:
-  "valid": true ve alanları doldur.
+- Her şey uygunsa "valid": true ve alanları doldur.
+
 Kurallar:
 - "tutar" sayıya dönüştür (virgüllü ise noktaya çevir).
 - "faiz" yoksa null yaz.
@@ -153,26 +135,26 @@ Kurallar:
   - oncelik == "ACIL" ise alarm = true
   - VEYA islem == "borc_ekle" ve tutar > 5000 ise alarm = true
   - aksi halde alarm = false.
-- islem == "yatirim_ekle" ise:
-  - "karar": "BASLA" | "IZLE" | "DUR"
+- islem == "yatirim_ekle" ise: "karar": "BASLA" | "IZLE" | "DUR"
 - Diğer tüm işlemlerde "karar": "IZLE".
-Sadece aşağıdaki JSON'u döndür (ekstra açıklama yazma):
+
+Sadece JSON döndür (ekstra açıklama yazma):
 {
   "valid": true/false,
   "islem": "...",
   "ad": "...",
   "tutar": 0,
   "etiket": "...",
-  "faiz": null veya 0,
+  "faiz": null,
   "oncelik": "ACIL" | "YUKSEK" | "NORMAL",
   "aciklama": "...",
   "alarm": true/false,
   "karar": "BASLA" | "IZLE" | "DUR",
   "hata": "..."
 }
+
 KOMUT METNİ:
-${text}
-`;
+${text}`;
 
     const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -208,60 +190,54 @@ ${text}
 
     if (!payload.valid) {
       const hata = payload.hata || 'Geçersiz komut.';
-      return res.json({ text: `Komut hatalı: ${hata}` });
+      return res.json({ text: `❌ Komut hatalı: ${hata}` });
     }
 
-    // -------------------------------------------------
-    // 3.2. Notion'a yaz
-    // -------------------------------------------------
     let notionUrl = '';
     if (process.env.NOTION_TOKEN && process.env.NOTION_FINANS_DB) {
       try {
-          const notionRes = await fetch('https://api.notion.com/v1/pages', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${process.env.NOTION_TOKEN}`,
-              'Notion-Version': '2022-06-28',
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              parent: { database_id: process.env.NOTION_FINANS_DB },
-              properties: {
-                'Ad': { title: [{ text: { content: payload.ad } }] },
-                'İşlem Türü': { select: { name: payload.islem } },
-                'Tutar': { number: payload.tutar },
-                'Etiket': { multi_select: [{ name: payload.etiket } ] },
-                'Faiz': { number: payload.faiz ?? null },
-                'Öncelik': { select: { name: payload.oncelik } },
-                'Alarm': { checkbox: !!payload.alarm },
-                'Karar': { select: { name: payload.karar } },
-                'Açıklama': {
-                  rich_text: [{ text: { content: payload.aciklama ?? '' } }]
-                },
-                'Kaynak': { select: { name: 'Slack' } },
-                'Slack Kullanıcı': {
-                  rich_text: [{ text: { content: userName } }]
-                },
-                'Slack Kanal': {
-                  rich_text: [{ text: { content: channelId } }]
-                }
+        const notionRes = await fetch('https://api.notion.com/v1/pages', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.NOTION_TOKEN}`,
+            'Notion-Version': '2022-06-28',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            parent: { database_id: process.env.NOTION_FINANS_DB },
+            properties: {
+              'Ad': { title: [{ text: { content: payload.ad } }] },
+              'İşlem Türü': { select: { name: payload.islem } },
+              'Tutar': { number: payload.tutar },
+              'Etiket': { multi_select: [{ name: payload.etiket }] },
+              'Faiz': { number: payload.faiz ?? null },
+              'Öncelik': { select: { name: payload.oncelik } },
+              'Alarm': { checkbox: !!payload.alarm },
+              'Karar': { select: { name: payload.karar } },
+              'Açıklama': {
+                rich_text: [{ text: { content: payload.aciklama ?? '' } }]
+              },
+              'Kaynak': { select: { name: 'Slack' } },
+              'Slack Kullanıcı': {
+                rich_text: [{ text: { content: userName } }]
+              },
+              'Slack Kanal': {
+                rich_text: [{ text: { content: channelId } }]
               }
-            })
-          });
-          if (notionRes.ok) {
-            const notionData = await notionRes.json();
-            notionUrl = notionData?.url || '';
-          } else {
-            console.error("Notion API Error:", await notionRes.text());
-          }
+            }
+          })
+        });
+        if (notionRes.ok) {
+          const notionData = await notionRes.json();
+          notionUrl = notionData?.url || '';
+        } else {
+          console.error("Notion API Error:", await notionRes.text());
+        }
       } catch (err) {
         console.error("Notion Error:", err);
       }
     }
 
-    // -------------------------------------------------
-    // 3.3. Google Sheets'e yaz
-    // -------------------------------------------------
     try {
       const saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
       if (saJson && process.env.FINANS_SHEET_ID && process.env.FINANS_SHEET_ID !== 'YOUR_GOOGLE_SHEET_ID_HERE') {
@@ -297,29 +273,21 @@ ${text}
       console.error('Sheets error:', err);
     }
 
-    // -------------------------------------------------
-    // 3.4. WhatsApp alarm (Baileys)
-    // -------------------------------------------------
     if (payload.alarm) {
       const alarmText = `[Finans Alarm]
 İşlem: ${payload.islem}
 Ad: ${payload.ad}
 Tutar: ${payload.tutar}₺
 Öncelik: ${payload.oncelik}
-Karar: ${payload.karar} 
+Karar: ${payload.karar}
 ${notionUrl ? `Notion: ${notionUrl}` : ''}`;
       await sendWhatsAppAlarm(alarmText);
     }
 
-    // -------------------------------------------------
-    // 3.5. Slack log ve alarm kanalları
-    // -------------------------------------------------
     const slackBotToken = process.env.SLACK_BOT_TOKEN;
     if (slackBotToken) {
-      const logText = `Yeni finans işlemi işlendi: ${payload.ad} (${payload.tutar}₺, ${payload.islem}, öncelik: ${payload.oncelik}, alarm: ${payload.alarm ? 'EVET' : 'HAYIR'}) ${notionUrl ? `
-Notion: ${notionUrl}` : ''}`;
-      
-      // Log kanalı
+      const logText = `Yeni finans işlemi: ${payload.ad} (${payload.tutar}₺, ${payload.islem}, öncelik: ${payload.oncelik}, alarm: ${payload.alarm ? 'EVET' : 'HAYIR'}) ${notionUrl ? `\nNotion: ${notionUrl}` : ''}`;
+
       if (process.env.SLACK_LOG_CHANNEL) {
         await fetch('https://slack.com/api/chat.postMessage', {
           method: 'POST',
@@ -334,15 +302,13 @@ Notion: ${notionUrl}` : ''}`;
         });
       }
 
-      // Alarm kanalı
       if (payload.alarm && process.env.SLACK_ALARM_CHANNEL) {
         const alarmText = `:rotating_light: ACİL FİNANS UYARISI :rotating_light:
 İşlem: ${payload.islem}
 Ad: ${payload.ad}
 Tutar: ${payload.tutar}₺
 Öncelik: ${payload.oncelik}
-Karar: ${payload.karar} ${notionUrl ? `
-Notion: ${notionUrl}` : ''}`;
+Karar: ${payload.karar}${notionUrl ? `\nNotion: ${notionUrl}` : ''}`;
 
         await fetch('https://slack.com/api/chat.postMessage', {
           method: 'POST',
@@ -358,24 +324,18 @@ Notion: ${notionUrl}` : ''}`;
       }
     }
 
-    // Slash komuta yanıt
     return res.json({
       response_type: 'ephemeral',
-      text: `✅ İşlem kaydedildi: *${payload.ad}* (${payload.tutar}₺)
-Alarm: ${payload.alarm ? 'EVET' : 'HAYIR'}`
+      text: `✅ İşlem kaydedildi: *${payload.ad}* (${payload.tutar}₺)\nAlarm: ${payload.alarm ? 'EVET' : 'HAYIR'}`
     });
-
   } catch (err) {
     console.error('Genel hata:', err);
     return res.json({ text: 'Sunucu hatası. Lütfen daha sonra tekrar deneyin.' });
   }
 });
 
-// -----------------------------------------------------
-// 4) Sunucuyu ve WhatsApp'ı başlat
-// -----------------------------------------------------
 app.listen(port, () => {
-  console.log(`Finans OS server http://localhost:${port} üzerinde çalışıyor`);
-  console.log('WhatsApp için QR kodu bekleniyor...');
+  console.log(`🚀 Finans OS server http://localhost:${port} üzerinde çalışıyor`);
+  console.log('📱 WhatsApp için QR kodu bekleniyor...');
   initWhatsApp().catch(err => console.error('WhatsApp init error:', err));
 });

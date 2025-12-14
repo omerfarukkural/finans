@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  finans-os:
+    build: .
+    container_name: finans-os
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET}
+      SLACK_LOG_CHANNEL: ${SLACK_LOG_CHANNEL}
+      SLACK_ALARM_CHANNEL: ${SLACK_ALARM_CHANNEL}
+      NOTION_TOKEN: ${NOTION_TOKEN}
+      NOTION_FINANS_DB: ${NOTION_FINANS_DB}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON}
+      FINANS_SHEET_ID: ${FINANS_SHEET_ID}
+      WHATSAPP_TARGET: ${WHATSAPP_TARGET}
+    volumes:
+      - ./wa_auth:/app/wa_auth
+    restart: unless-stopped
+    networks:
+      - finans-network
+
+networks:
+  finans-network:
+    driver: bridge
